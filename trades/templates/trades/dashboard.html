@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BSE Trades Dashboard</title>
+<style>
+  :root { --bg:#0f172a; --card:#1e293b; --muted:#94a3b8; --text:#e2e8f0; --green:#22c55e; --blue:#3b82f6; --red:#ef4444; --amber:#f59e0b; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; justify-content:space-between; padding:16px 24px; border-bottom:1px solid #334155; }
+  h1 { margin:0; font-size:20px; }
+  .badge { padding:4px 12px; border-radius:999px; font-size:13px; font-weight:600; }
+  .idle { background:#334155; } .running { background:var(--amber); color:#111; } .complete { background:var(--green); color:#052e16; } .failed { background:var(--red); }
+  main { padding:24px; max-width:1200px; margin:auto; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-bottom:16px; }
+  .card { background:var(--card); border-radius:10px; padding:14px 16px; }
+  .card .label { color:var(--muted); font-size:12px; text-transform:uppercase; }
+  .card .value { font-size:24px; font-weight:700; margin-top:4px; }
+  .bar { height:8px; background:#334155; border-radius:4px; overflow:hidden; margin-top:8px; }
+  .bar > div { height:100%; background:var(--blue); width:0; transition:width .4s; }
+  .toolbar { display:flex; gap:8px; margin:16px 0; flex-wrap:wrap; }
+  input, button { background:var(--card); color:var(--text); border:1px solid #334155; border-radius:8px; padding:8px 12px; font-size:14px; }
+  button { cursor:pointer; } button:hover { border-color:var(--blue); } button:disabled { opacity:.5; cursor:not-allowed; }
+  input { flex:1; min-width:200px; }
+  table { width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; font-size:14px; }
+  th, td { padding:10px 12px; text-align:left; border-bottom:1px solid #334155; }
+  th { color:var(--muted); font-size:12px; text-transform:uppercase; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  th.num { text-align:right; }
+  tr.fresh { animation: flash 2.5s ease-out; }
+  @keyframes flash { from { background:rgba(34,197,94,.35); } to { background:transparent; } }
+  .note { color:var(--muted); font-size:13px; margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>BSE Trades Dashboard</h1>
+  <span id="badge" class="badge idle">Loading...</span>
+</header>
+<main>
+  <div class="cards">
+    <div class="card"><div class="label">Trades in DB</div><div class="value" id="total">0</div></div>
+    <div class="card"><div class="label">Pull progress</div><div class="value" id="progress">-</div><div class="bar"><div id="barfill"></div></div></div>
+    <div class="card"><div class="label">Last update</div><div class="value" id="updated" style="font-size:16px">-</div></div>
+  </div>
+  <div class="toolbar">
+    <input id="search" placeholder="Filter by trade ID, client or symbol...">
+    <button id="pullBtn">Start new pull</button>
+    <button id="resetBtn">Reset DB (demo)</button>
+  </div>
+  <table>
+    <thead><tr><th>Trade ID</th><th>Client</th><th>Symbol</th><th class="num">Qty</th><th class="num">Price</th><th>Timestamp</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="note" id="note"></div>
+</main>
+<script>
+const rows = new Map();          // trade_id -> trade (dedupe: REST + SSE overlap safe)
+const fresh = new Map();         // trade_id -> flash expiry
+let state = {};
+const $ = id => document.getElementById(id);
+const MAX_ROWS = 200;
+
+function addTrades(list, flash) {
+  for (const t of list) {
+    if (!rows.has(t.trade_id)) {
+      rows.set(t.trade_id, t);
+      if (flash) fresh.set(t.trade_id, Date.now() + 2500);
+    }
+  }
+}
+
+function setState(s) { if (s) { state = s; } }
+
+let scheduled = false;
+function render() {
+  if (scheduled) return; scheduled = true;
+  requestAnimationFrame(() => { scheduled = false; draw(); });
+}
+
+function draw() {
+  const s = state, running = s.status === 'running';
+  const b = $('badge');
+  b.className = 'badge ' + (s.status || 'idle');
+  b.textContent = running ? `Pull in progress... (${s.page}/${s.total_pages || '?'})`
+    : s.status === 'complete' ? 'Up to date'
+    : s.status === 'failed' ? 'Pull failed: ' + (s.error || '')
+    : 'Idle';
+  $('total').textContent = rows.size.toLocaleString();
+  const pct = s.total_pages ? Math.round(100 * s.page / s.total_pages) : 0;
+  $('progress').textContent = s.total_pages ? pct + '%' : '-';
+  $('barfill').style.width = pct + '%';
+  $('pullBtn').disabled = running;
+  $('resetBtn').disabled = running;
+
+  const q = $('search').value.trim().toLowerCase();
+  let list = [...rows.values()].sort((a, b) => b.id - a.id);
+  if (q) list = list.filter(t => (t.trade_id + t.client + t.symbol).toLowerCase().includes(q));
+  const now = Date.now();
+  $('rows').innerHTML = list.slice(0, MAX_ROWS).map(t =>
+    `<tr class="${(fresh.get(t.trade_id) || 0) > now ? 'fresh' : ''}">
+      <td>${t.trade_id}</td><td>${t.client}</td><td>${t.symbol}</td>
+      <td class="num">${t.quantity}</td><td class="num">${t.price.toFixed(2)}</td>
+      <td>${new Date(t.timestamp).toLocaleString()}</td></tr>`).join('');
+  $('note').textContent = `Showing ${Math.min(list.length, MAX_ROWS)} of ${list.length} (latest pulled first)`;
+}
+
+// 1) SSE pehle connect (push, polling nahi). Browser auto-reconnect + Last-Event-ID replay karta hai.
+const es = new EventSource('/api/stream');
+es.addEventListener('trades', e => {
+  const d = JSON.parse(e.data);
+  addTrades(d.trades, true); setState(d.state);
+  $('updated').textContent = new Date().toLocaleTimeString();
+  render();
+});
+es.addEventListener('status', e => { setState(JSON.parse(e.data)); render(); });
+
+// 2) Instant load: DB me jo trades already hain wo turant
+fetch('/api/trades').then(r => r.json()).then(d => {
+  addTrades(d.trades, false); setState(d.state); render();
+});
+
+$('pullBtn').onclick = () => fetch('/api/pull', { method: 'POST' });
+$('resetBtn').onclick = async () => {
+  const r = await fetch('/api/reset', { method: 'POST' });
+  if (r.ok) { rows.clear(); fresh.clear(); state = { status: 'idle' }; render(); }
+};
+$('search').oninput = render;
+</script>
+</body>
+</html>

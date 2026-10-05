@@ -1,0 +1,22 @@
+services:
+  mock-bse:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8001 --noreload --settings=config.mock_settings
+    environment:
+      PULL_DELAY_SECONDS: ${PULL_DELAY_SECONDS:-900}   # 900 = 15 min
+      TOTAL_TRADES: ${TOTAL_TRADES:-3000}
+    ports: ["8001:8001"]
+
+  dashboard:
+    build: .
+    command: sh -c "python manage.py migrate && python manage.py runserver 0.0.0.0:8000 --noreload"
+    environment:
+      BSE_URL: http://mock-bse:8001
+      DB_PATH: /data/db.sqlite3
+      AUTO_PULL_ON_START: ${AUTO_PULL_ON_START:-true}
+    volumes: ["trades-data:/data"]
+    ports: ["8000:8000"]
+    depends_on: [mock-bse]
+
+volumes:
+  trades-data:
